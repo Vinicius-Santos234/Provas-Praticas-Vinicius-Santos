@@ -4,6 +4,8 @@ import {
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
+  sendEmailVerification,
+  reload,
 } from "firebase/auth";
 import {
   collection,
@@ -17,16 +19,29 @@ import {
 } from "firebase/firestore";
 import { auth, db } from "./firebase";
 
+// ─── Status Bar ────────────────────────────────────────────────────────────────
 function StatusBar({ message }) {
   return <div className="statusbar">{message}</div>;
 }
 
-function AuthScreen({ onStatus }) {
-  const [mode, setMode] = useState("login"); 
+// ─── Auth Screen ───────────────────────────────────────────────────────────────
+function AuthScreen({ onStatus, onVerified }) {
+  const [mode, setMode] = useState("login"); // "login" | "register"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [errors, setErrors] = useState({});
   const [loading, setLoading] = useState(false);
+  // Controla a tela de "aguardando verificação"
+  const [pendingUser, setPendingUser] = useState(null);
+  const [checkingVerification, setCheckingVerification] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  // Contador de cooldown para reenvio
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const t = setTimeout(() => setResendCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [resendCooldown]);
 
   function validate() {
     const e = {};
@@ -43,10 +58,18 @@ function AuthScreen({ onStatus }) {
     setLoading(true);
     try {
       if (mode === "register") {
-        await createUserWithEmailAndPassword(auth, email, password);
-        onStatus("✔ Conta criada com sucesso!");
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await sendEmailVerification(cred.user);
+        setPendingUser(cred.user);
+        setResendCooldown(60);
       } else {
-        await signInWithEmailAndPassword(auth, email, password);
+        const cred = await signInWithEmailAndPassword(auth, email, password);
+        if (!cred.user.emailVerified) {
+          // Guarda o objeto real do Firebase para poder chamar reload() depois
+          setPendingUser(cred.user);
+          setErrors({ general: null });
+          return;
+        }
         onStatus("✔ Login realizado!");
       }
     } catch (err) {
@@ -63,6 +86,87 @@ function AuthScreen({ onStatus }) {
     }
   }
 
+  // Verifica se o email já foi confirmado
+  async function handleCheckVerification() {
+    if (!pendingUser) return;
+    setCheckingVerification(true);
+    try {
+      // Sempre usa auth.currentUser para garantir objeto atualizado
+      const currentUser = auth.currentUser || pendingUser;
+      await reload(currentUser);
+      if (currentUser.emailVerified) {
+        onStatus("✔ E-mail verificado! Bem-vindo!");
+        onVerified(currentUser); // força atualização imediata sem precisar recarregar
+      } else {
+        setErrors({ general: "E-mail ainda não confirmado. Verifique sua caixa de entrada." });
+      }
+    } catch {
+      setErrors({ general: "Erro ao verificar. Tente novamente." });
+    } finally {
+      setCheckingVerification(false);
+    }
+  }
+
+  async function handleResendEmail() {
+    if (resendCooldown > 0 || !pendingUser || pendingUser._unverified) return;
+    try {
+      await sendEmailVerification(pendingUser);
+      setResendCooldown(60);
+      setErrors({ general: null });
+      onStatus("📧 E-mail reenviado!");
+    } catch {
+      setErrors({ general: "Erro ao reenviar. Tente mais tarde." });
+    }
+  }
+
+  // ── Tela de aguardando verificação ──
+  if (pendingUser) {
+    const targetEmail = pendingUser.email || email;
+    return (
+      <div className="auth-wrapper">
+        <div className="auth-card">
+          <div className="auth-logo">📧</div>
+          <h2 className="auth-title">VERIFIQUE <span>SEU E-MAIL</span></h2>
+          <p className="auth-sub">
+            {"Confirme seu e-mail para acessar o sistema:"}
+          </p>
+          <div className="verify-email-box">{targetEmail}</div>
+          <p className="verify-hint">
+            Clique no link do e-mail e depois pressione o botão abaixo para entrar.
+          </p>
+
+          {errors.general && <div className="auth-error">{errors.general}</div>}
+
+          <button
+              className="btn-add"
+              onClick={handleCheckVerification}
+              disabled={checkingVerification}
+            >
+              {checkingVerification ? "Verificando..." : "✔ Já confirmei meu e-mail"}
+            </button>
+
+          <button
+            className="btn-resend"
+            onClick={handleResendEmail}
+            disabled={resendCooldown > 0}
+          >
+            {resendCooldown > 0
+              ? `Reenviar em ${resendCooldown}s`
+              : "Reenviar e-mail de verificação"}
+          </button>
+
+          <button
+            className="btn-back"
+            onClick={() => { setPendingUser(null); setErrors({}); }}
+          >
+            ← Voltar ao login
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Tela normal de login/cadastro ──
   return (
     <div className="auth-wrapper">
       <div className="auth-card">
@@ -118,13 +222,20 @@ function AuthScreen({ onStatus }) {
         <button className="btn-add" onClick={handleSubmit} disabled={loading}>
           {loading ? "Aguarde..." : mode === "login" ? "Entrar" : "Criar Conta"}
         </button>
+
+        {mode === "login" && (
+          <p className="auth-hint">
+            Novo por aqui? Cadastre-se e confirme seu e-mail para acessar.
+          </p>
+        )}
       </div>
     </div>
   );
 }
 
+// ─── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [user, setUser] = useState(undefined);
+  const [user, setUser] = useState(undefined); // undefined = carregando
   const [products, setProducts] = useState([]);
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
@@ -134,16 +245,26 @@ export default function App() {
   const [loadingProducts, setLoadingProducts] = useState(true);
   const nameRef = useRef(null);
 
+  // Observa estado de autenticação — só aceita usuários com e-mail verificado
   useEffect(() => {
     document.title = "Sistema de Produtos";
-    const unsub = onAuthStateChanged(auth, (u) => setUser(u ?? null));
+    const unsub = onAuthStateChanged(auth, (u) => {
+      // Só bloqueia se não verificado; se já foi verificado via reload, setUser já foi chamado
+      if (u && !u.emailVerified) {
+        setUser(null);
+      } else {
+        setUser(u ?? null);
+      }
+    });
     return unsub;
   }, []);
 
+  // Escuta produtos do Firestore em tempo real (apenas do usuário logado)
   useEffect(() => {
     if (!user) { setProducts([]); return; }
     const q = query(
       collection(db, "users", user.uid, "produtos"),
+      orderBy("criadoEm", "desc")
     );
     const unsub = onSnapshot(q, (snap) => {
       setProducts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
@@ -209,6 +330,7 @@ export default function App() {
   const confirmProduct = products.find((p) => p.id === confirmId);
   const total = products.reduce((sum, p) => sum + (p.preco || 0), 0);
 
+  // ── Tela de carregamento inicial ──
   if (user === undefined) {
     return (
       <>
@@ -222,12 +344,13 @@ export default function App() {
     );
   }
 
+  // ── Tela de autenticação ──
   if (!user) {
     return (
       <>
         <style>{baseStyles}</style>
         <StatusBar message="Sistema de Produtos" />
-        <AuthScreen onStatus={showStatus} />
+        <AuthScreen onStatus={showStatus} onVerified={setUser} />
         <footer>
           <strong>Vinicius Gonçalves Oliveira Santos</strong> &nbsp;·&nbsp;{" "}
           {new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" })}
@@ -236,10 +359,12 @@ export default function App() {
     );
   }
 
+  // ── App principal (autenticado) ──
   return (
     <>
       <style>{baseStyles}</style>
 
+      {/* MODAL DE CONFIRMAÇÃO */}
       {confirmId && (
         <div className="overlay">
           <div className="modal">
@@ -259,6 +384,7 @@ export default function App() {
 
       <StatusBar message={statusMsg} />
 
+      {/* HERO */}
       <div className="hero">
         <img
           className="hero-img"
@@ -268,6 +394,7 @@ export default function App() {
         <h1>CATÁLOGO <span>PRO</span></h1>
         <p>Cadastro e listagem de produtos</p>
 
+        {/* Info do usuário + logout */}
         <div className="user-bar">
           <span className="user-email">👤 {user.email}</span>
           <button className="btn-logout" onClick={handleLogout}>Sair</button>
@@ -276,6 +403,7 @@ export default function App() {
 
       <div className="container">
 
+        {/* STATS */}
         <div className="stats">
           <div className="stat-box">
             <div className="label">Produtos</div>
@@ -287,6 +415,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* FORM */}
         <div className="form-card">
           <h2>Adicionar Produto</h2>
           <div className="fields-row">
@@ -321,6 +450,7 @@ export default function App() {
           </button>
         </div>
 
+        {/* PRODUCT LIST */}
         <div className="section-title">Produtos Cadastrados</div>
         <div className="product-list">
           {loadingProducts ? (
@@ -360,6 +490,7 @@ export default function App() {
   );
 }
 
+// ─── Styles ────────────────────────────────────────────────────────────────────
 const baseStyles = `
   @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap');
 
@@ -389,6 +520,7 @@ const baseStyles = `
   }
   #root { width: 100%; min-height: 100vh; background: var(--black); }
 
+  /* STATUS BAR */
   .statusbar {
     background: var(--purple);
     color: #fff;
@@ -403,6 +535,7 @@ const baseStyles = `
     z-index: 100;
   }
 
+  /* LOADING */
   .loading-screen {
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
@@ -418,6 +551,7 @@ const baseStyles = `
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* AUTH */
   .auth-wrapper {
     display: flex; align-items: center; justify-content: center;
     min-height: calc(100vh - 100px);
@@ -470,6 +604,63 @@ const baseStyles = `
     text-align: center;
   }
 
+  .verify-email-box {
+    background: var(--black);
+    border: 1px solid var(--purple);
+    border-radius: 10px;
+    padding: 12px 16px;
+    font-size: 0.88rem;
+    color: var(--purple-light);
+    font-weight: 600;
+    text-align: center;
+    margin: 12px 0 8px;
+    word-break: break-all;
+  }
+  .verify-hint {
+    font-size: 0.78rem;
+    color: var(--gray-text);
+    text-align: center;
+    line-height: 1.5;
+    margin-bottom: 20px;
+  }
+  .btn-resend {
+    width: 100%;
+    padding: 11px;
+    background: none;
+    border: 1px solid var(--gray-mid);
+    color: var(--gray-text);
+    border-radius: 10px;
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 600;
+    font-size: 0.85rem;
+    cursor: pointer;
+    margin-top: 10px;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .btn-resend:hover:not(:disabled) { border-color: var(--purple-light); color: var(--purple-light); }
+  .btn-resend:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-back {
+    width: 100%;
+    padding: 10px;
+    background: none;
+    border: none;
+    color: var(--gray-text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.82rem;
+    cursor: pointer;
+    margin-top: 8px;
+    transition: color 0.2s;
+  }
+  .btn-back:hover { color: var(--white); }
+  .auth-hint {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--gray-text);
+    margin-top: 14px;
+    line-height: 1.5;
+  }
+
+  /* HERO */
   .hero {
     padding: 48px 24px 28px;
     text-align: center;
@@ -501,6 +692,7 @@ const baseStyles = `
   .hero h1 span { color: var(--purple-light); }
   .hero > p { color: var(--gray-text); margin-top: 6px; font-size: 0.88rem; }
 
+  /* USER BAR */
   .user-bar {
     display: inline-flex; align-items: center; gap: 12px;
     margin-top: 16px;
@@ -523,8 +715,10 @@ const baseStyles = `
   }
   .btn-logout:hover { background: #f8717130; }
 
+  /* CONTAINER */
   .container { max-width: 680px; margin: 0 auto; padding: 0 20px 40px; }
 
+  /* STATS */
   .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-bottom: 28px; }
   .stat-box {
     background: var(--gray); border: 1px solid var(--gray-mid);
@@ -539,6 +733,7 @@ const baseStyles = `
     font-size: 1.8rem; color: var(--purple-light);
   }
 
+  /* FORM */
   .form-card {
     background: var(--gray); border: 1px solid var(--gray-mid);
     border-radius: 16px; padding: 28px; margin-bottom: 32px;
@@ -578,6 +773,7 @@ const baseStyles = `
   .btn-add:active { transform: scale(0.98); }
   .btn-add:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  /* PRODUCT LIST */
   .section-title {
     font-family: 'Bebas Neue', sans-serif;
     font-size: 1.3rem; letter-spacing: 0.08em;
@@ -613,6 +809,7 @@ const baseStyles = `
   }
   .btn-remove:hover { color: var(--red); border-color: var(--red); background: var(--red-dim); }
 
+  /* EMPTY */
   .empty { text-align: center; color: var(--gray-text); padding: 40px 0 32px; font-size: 0.9rem; }
   .empty-icon { display: block; font-size: 2.4rem; margin-bottom: 10px; }
   .empty p { margin-bottom: 16px; }
@@ -625,6 +822,7 @@ const baseStyles = `
   }
   .btn-empty:hover { background: #7c3aed22; box-shadow: 0 0 14px #7c3aed33; }
 
+  /* MODAL */
   .overlay {
     position: fixed; inset: 0; background: #00000099;
     backdrop-filter: blur(4px); z-index: 200;
@@ -662,6 +860,7 @@ const baseStyles = `
   }
   .btn-confirm-remove:hover { background: #f8717130; }
 
+  /* FOOTER */
   footer {
     border-top: 1px solid var(--gray-mid); text-align: center;
     padding: 24px 16px; color: var(--gray-text); font-size: 0.8rem; font-weight: 300;
