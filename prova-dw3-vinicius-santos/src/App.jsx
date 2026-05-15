@@ -243,6 +243,11 @@ export default function App() {
   const [errors, setErrors] = useState({});
   const [confirmId, setConfirmId] = useState(null);
   const [loadingProducts, setLoadingProducts] = useState(true);
+  const [personagens, setPersonagens] = useState([]);
+  const [loadingPersonagens, setLoadingPersonagens] = useState(true);
+  const [charName, setCharName] = useState("");
+  const [charUrl, setCharUrl] = useState("");
+  const [charErrors, setCharErrors] = useState({});
   const nameRef = useRef(null);
 
   // Observa estado de autenticação — só aceita usuários com e-mail verificado
@@ -272,6 +277,23 @@ export default function App() {
     });
     return unsub;
   }, [user]);
+
+  // Escuta coleção personagens em tempo real
+  useEffect(() => {
+    const q = query(collection(db, "personagens"), orderBy("dataCadastro", "desc"));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        setPersonagens(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        setLoadingPersonagens(false); // garante que para o spinner mesmo com coleção vazia
+      },
+      (err) => {
+        console.error("Erro ao escutar personagens:", err);
+        setLoadingPersonagens(false); // para o spinner mesmo em caso de erro
+      }
+    );
+    return unsub;
+  }, []);
 
   function showStatus(msg) {
     setStatusMsg(msg);
@@ -322,6 +344,41 @@ export default function App() {
     showStatus("Sistema de Produtos");
   }
 
+  function validateChar() {
+    const e = {};
+    if (!charName.trim()) e.name = "Informe o nome do personagem.";
+    if (!charUrl.trim()) e.url = "Informe a URL da imagem.";
+    else if (!charUrl.startsWith("http")) e.url = "URL inválida.";
+    setCharErrors(e);
+    return Object.keys(e).length === 0;
+  }
+
+  async function handleAddPersonagem() {
+    if (!validateChar()) return;
+    try {
+      await addDoc(collection(db, "personagens"), {
+        nome: charName.trim(),
+        imagemUrl: charUrl.trim(),
+        dataCadastro: serverTimestamp(),
+      });
+      setCharName("");
+      setCharUrl("");
+      setCharErrors({});
+      showStatus("✔ Personagem salvo no Firestore!");
+    } catch (err) {
+      showStatus("❌ Erro ao salvar: " + err.message);
+    }
+  }
+
+  async function handleRemovePersonagem(id) {
+    try {
+      await deleteDoc(doc(db, "personagens", id));
+      showStatus("🗑 Personagem removido.");
+    } catch (err) {
+      showStatus("❌ Erro ao remover: " + err.message);
+    }
+  }
+
   function focusForm() {
     nameRef.current?.focus();
     nameRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -352,7 +409,7 @@ export default function App() {
         <StatusBar message="Sistema de Produtos" />
         <AuthScreen onStatus={showStatus} onVerified={setUser} />
         <footer>
-          <strong>Vinicius Gonçalves Oliveira Santos</strong> &nbsp;·&nbsp;{" "}
+          <strong>Grupo 5</strong> &nbsp;·&nbsp;{" "}
           {new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" })}
         </footer>
       </>
@@ -482,8 +539,81 @@ export default function App() {
         </div>
       </div>
 
+      {/* PERSONAGENS MARVEL */}
+      <div className="container">
+        <div className="section-divider" />
+
+        <div className="form-card">
+          <h2>⚡ Personagens Marvel</h2>
+          <p className="section-desc">Cadastre personagens com imagens do Supabase Storage</p>
+          <div className="field">
+            <input
+              type="text"
+              placeholder="Nome do personagem (ex: Homem-Aranha)"
+              value={charName}
+              className={charErrors.name ? "has-error" : ""}
+              onChange={(e) => { setCharName(e.target.value); if (charErrors.name) setCharErrors((p) => ({ ...p, name: null })); }}
+              onKeyDown={(e) => e.key === "Enter" && handleAddPersonagem()}
+            />
+            {charErrors.name && <span className="error-msg">⚠ {charErrors.name}</span>}
+          </div>
+          <div className="field">
+            <input
+              type="url"
+              placeholder="URL da imagem (Supabase Storage)"
+              value={charUrl}
+              className={charErrors.url ? "has-error" : ""}
+              onChange={(e) => { setCharUrl(e.target.value); if (charErrors.url) setCharErrors((p) => ({ ...p, url: null })); }}
+              onKeyDown={(e) => e.key === "Enter" && handleAddPersonagem()}
+            />
+            {charErrors.url && <span className="error-msg">⚠ {charErrors.url}</span>}
+          </div>
+          <button className="btn-add" onClick={handleAddPersonagem}>
+            + Salvar Personagem no Firestore
+          </button>
+        </div>
+
+        <div className="section-title">Personagens Cadastrados</div>
+        <div className="char-grid">
+          {loadingPersonagens ? (
+            <div className="empty"><div className="spinner" /></div>
+          ) : personagens.length === 0 ? (
+            <div className="empty">
+              <span className="empty-icon">🦸</span>
+              <p>Nenhum personagem cadastrado ainda.</p>
+            </div>
+          ) : (
+            personagens.map((p) => (
+              <div className="char-card" key={p.id}>
+                <div className="char-img-wrap">
+                  <img
+                    src={p.imagemUrl}
+                    alt={p.nome}
+                    className="char-img"
+                    onError={(e) => { e.target.src = "https://via.placeholder.com/300x200?text=Imagem+indisponível"; }}
+                  />
+                </div>
+                <div className="char-info">
+                  <div className="char-name">{p.nome}</div>
+                  <div className="char-date">
+                    {p.dataCadastro?.toDate
+                      ? p.dataCadastro.toDate().toLocaleDateString("pt-BR")
+                      : "—"}
+                  </div>
+                  <button
+                    className="btn-remove char-remove"
+                    title="Remover personagem"
+                    onClick={() => handleRemovePersonagem(p.id)}
+                  >✕ Remover</button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
       <footer>
-        <strong>Vinicius Gonçalves Oliveira Santos</strong> &nbsp;·&nbsp;{" "}
+        <strong>Grupo 5</strong> &nbsp;·&nbsp;{" "}
         {new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" })}
       </footer>
     </>
@@ -859,6 +989,76 @@ const baseStyles = `
     transition: background 0.2s;
   }
   .btn-confirm-remove:hover { background: #f8717130; }
+
+  /* PERSONAGENS */
+  .section-divider {
+    border: none;
+    border-top: 1px solid var(--gray-mid);
+    margin: 0 0 32px;
+  }
+  .section-desc {
+    font-size: 0.8rem;
+    color: var(--gray-text);
+    margin-top: -14px;
+    margin-bottom: 20px;
+  }
+  .char-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+  .char-card {
+    background: var(--gray);
+    border: 1px solid var(--gray-mid);
+    border-radius: 14px;
+    overflow: hidden;
+    animation: fadeUp 0.35s ease both;
+    transition: border-color 0.2s, transform 0.2s;
+  }
+  .char-card:hover {
+    border-color: var(--purple);
+    transform: translateY(-3px);
+  }
+  .char-img-wrap {
+    width: 100%;
+    height: 240px;
+    overflow: hidden;
+    background: var(--black);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .char-img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    transition: transform 0.3s;
+  }
+  .char-card:hover .char-img { transform: scale(1.05); }
+  .char-info {
+    padding: 14px 16px;
+  }
+  .char-name {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 1.2rem;
+    letter-spacing: 0.06em;
+    color: var(--white);
+    margin-bottom: 4px;
+  }
+  .char-date {
+    font-size: 0.72rem;
+    color: var(--gray-text);
+    margin-bottom: 12px;
+    letter-spacing: 0.04em;
+  }
+  .char-remove {
+    width: 100%;
+    height: auto !important;
+    padding: 7px 0;
+    font-size: 0.78rem !important;
+    border-radius: 7px !important;
+  }
 
   /* FOOTER */
   footer {
